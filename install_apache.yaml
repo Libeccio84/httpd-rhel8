@@ -1,0 +1,136 @@
+---
+- hosts: all
+  gather_facts: false
+  become: true
+  vars:
+    buildParent: /tmp
+    enableHttp2: false
+    apache_user: apache
+    apache_uid: 779
+    apache_gid: 779
+    required_pkgs:
+      - glibc-devel
+      - gcc
+      - pcre2-devel
+      - zlib-devel
+      - openssl-devel
+      - make
+      - expat-devel
+      - redhat-rpm-config
+      - jansson-devel
+      - libcurl-devel
+    apacheVer: 2.4.59
+    aprUtilVer: 1.6.3
+    aprVer: 1.7.4
+    archives:
+      - url: 'https://dlcdn.apache.org/httpd/httpd-{{ apacheVer }}.tar.gz'
+        hash: 'sha512:https://downloads.apache.org/httpd/httpd-{{ apacheVer }}.tar.gz.sha512'
+      - url: 'https://dlcdn.apache.org//apr/apr-util-{{ aprUtilVer }}.tar.gz'
+        hash: 'sha256:https://www.apache.org/dist/apr/apr-util-{{ aprUtilVer }}.tar.gz.sha256'
+      - url: 'https://dlcdn.apache.org//apr/apr-{{ aprVer }}.tar.gz'
+        hash: 'sha256:https://www.apache.org/dist/apr/apr-{{ aprVer }}.tar.gz.sha256'
+  tasks:
+    - name: Install required packages
+      ansible.builtin.yum:
+        name: '{{ required_pkgs }}'
+        state: present
+    - name: Download archives
+      ansible.builtin.get_url:
+        url: '{{ item.url }}'
+        dest: '{{ buildParent }}'
+        checksum: '{{ item.hash }}'
+      loop: '{{ archives }}'
+    - name: Extract archives
+      ansible.builtin.unarchive:
+        src: '{{ buildParent }}/{{ item }}'
+        dest: '{{ buildParent }}'
+        remote_src: true
+      loop:
+        - 'httpd-{{ apacheVer }}.tar.gz'
+        - 'apr-util-{{ aprUtilVer }}.tar.gz'
+        - 'apr-{{ aprVer }}.tar.gz'
+    - name: Copy apr sources
+      ansible.builtin.copy:
+        src: '{{ buildParent }}/{{ item.src }}/'
+        dest: '{{ buildParent }}/httpd-{{ apacheVer }}/srclib/{{ item.dest }}'
+        remote_src: true
+      loop:
+        - src: 'apr-{{ aprVer }}'
+          dest: 'apr'
+        - src: 'apr-util-{{ aprUtilVer }}'
+          dest: 'apr-util'
+    - block:
+        - name: Install required package
+          ansible.builtin.yum:
+            name: c-ares-devel
+        - name: Download nghttp2 source code
+          ansible.builtin.get_url:
+            url: 'https://github.com/nghttp2/nghttp2/releases/download/v1.61.0/nghttp2-1.61.0.tar.gz'
+            checksum: 'sha256:https://github.com/nghttp2/nghttp2/releases/download/v1.61.0/checksums.txt'
+            dest: '{{ buildParent }}'
+        - name: Extract archives
+          ansible.builtin.unarchive:
+            src: '{{ buildParent }}/nghttp2-1.61.0.tar.gz'
+            dest: '{{ buildParent }}'
+            remote_src: true
+        - name: Launch configure
+          shell:
+            cmd: './configure --enable-lib-only --prefix=/opt/libHttp2'
+            chdir: '{{ buildParent }}/nghttp2-1.61.0'
+        - name: Launch make
+          shell:
+            cmd: 'make'
+            chdir: '{{ buildParent }}/nghttp2-1.61.0'
+        - name: Launch make install
+          shell:
+            cmd: 'make install'
+            chdir: '{{ buildParent }}/nghttp2-1.61.0'
+        - name: Launch configure - http2
+          shell:
+            cmd: './configure --with-included-apr --enable-http2 --with-nghttp2=/opt/libHttp2 --prefix=/opt/httpd-{{ apacheVer }}'
+            chdir: '{{ buildParent }}/httpd-{{ apacheVer }}'
+      when: enableHttp2|bool is true
+    - name: Launch configure - no http2
+      shell:
+        cmd: './configure --with-included-apr --prefix=/opt/httpd-{{ apacheVer }}'
+        chdir: '{{ buildParent }}/httpd-{{ apacheVer }}'
+      when: enableHttp2|bool is false
+    - name: Launch make
+      shell:
+        cmd: 'make'
+        chdir: ''
+    - name: Launch make install
+      shell:
+        cmd: 'make install'
+        chdir: '{{ buildParent }}/httpd-{{ apacheVer }}'
+    - name: Create apache group
+      ansible.builtin.group:
+        name: '{{ apache_user }}'
+        gid: '{{ apache_gid }}'
+    - name: Create apache user
+      ansible.builtin.user:
+        name: '{{ apache_user }}'
+        uid: '{{ apache_uid }}'
+        group: '{{ apache_user }}'
+        home: '{{ buildParent }}/httpd-{{ apacheVer }}'
+        shell: /sbin/nologin
+    - name: Update apache user
+      ansible.builtin.replace:
+        path: '{{ buildParent }}/httpd-{{ apacheVer }}'
+        regexp: '{{ item.reg }}'
+        replace: '{{ item.rep }}'
+      loop:
+        - reg: '^User .*$'
+          rep: 'User {{ apache_user }}'
+        - reg: '^Group .*$'
+          rep: 'Group {{ apache_user }}'
+    - name: Upload httpd service file
+      ansible.builtin.template:
+        src: httpd.service.j2
+        dest: '/etc/systemd/system/httpd-{{ apacheVer }}.service'
+    - name: Reaload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+        name: 'httpd-{{ apacheVer }}'
+        status: started
+        enabled: true

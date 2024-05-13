@@ -1,0 +1,18 @@
+[Unit]
+Description=The Apache HTTP Server Ver. {{ apacheVer }}
+Wants=httpd-init.service
+After=network.target remote-fs.target nss-lookup.target httpd-init.service
+
+[Service]
+Type=notify
+Environment=LANG=C
+
+ExecStart={{ buildParent }}/httpd-{{ apacheVer }}/httpd $OPTIONS -DFOREGROUND
+ExecReload={{ buildParent }}/httpd-{{ apacheVer }}/httpd $OPTIONS -k graceful
+# Send SIGWINCH for graceful stop
+KillSignal=SIGWINCH
+KillMode=mixed
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
